@@ -1,4 +1,4 @@
-# MeshLink Roadmap
+# meshlink Roadmap
 
 ## Completed
 
@@ -9,6 +9,7 @@
 - [x] Session expiry via in-memory timers (setTimeout per client)
 - [x] Boot persistence (systemd services, iptables-restore, ipset creation)
 - [x] Broker auto-start on boot (meshlink-broker.service)
+- [x] Open passwordless AP with client isolation and management-service firewalling
 
 ## Up Next
 
@@ -38,13 +39,12 @@ Wire up paid tiers (Lightweight, Premium) to Stripe payment links. The captive p
 Accept cryptocurrency payments for access tiers. Config structure exists (`enableCrypto`, `acceptCryptoPayments`) but no implementation yet.
 
 ### Multi-node mesh networking
-Support multiple MeshLink APs sharing a session database so clients can roam between nodes without re-authenticating.
-
-### Client isolation hardening
-Add `ap_isolate=1` in hostapd and iptables rules to prevent direct client-to-client traffic on the WiFi network.
+Support multiple meshlink APs sharing a session database so clients can roam between nodes without re-authenticating.
 
 ### HTTPS for admin interface
-Add TLS for the admin dashboard (not for the captive portal itself, which must stay HTTP for redirect to work).
+Admin (`/admin`) is now reachable on the portal HTTPS listener. Detection
+probes still use HTTP; a publicly trusted cert is required before phones will
+upgrade the Sign-in sheet to HTTPS.
 
 ### Automatic updates
 OTA update mechanism for pulling new broker builds and applying config changes without manual SSH.
