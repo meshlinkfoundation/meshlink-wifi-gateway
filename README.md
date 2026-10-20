@@ -46,19 +46,20 @@ Client joins the open "meshlink" WiFi
 
 The `install.sh` script handles everything end-to-end: AP setup, DHCP/DNS, NAT, captive portal redirect, Node.js install, broker build, and systemd services.
 
+The gateway and the broker are separate repositories. Clone both, with the broker next to this directory:
+
 ```bash
-# SSH into your Pi
-ssh meshlink@<pi-ip-address>
-
-# Clone the repo
-git clone <repo-url>
-cd meshlink/meshlink-wifi-gateway
-
-# Run the installer
+git clone https://github.com/meshlinkfoundation/broker.git
+git clone https://github.com/meshlinkfoundation/meshlink-wifi-gateway.git
+cd meshlink-wifi-gateway
 bash install.sh
 ```
 
-That's it. The script installs all packages, configures the AP, builds the broker, and starts all services.
+`bootstrap.sh` does those two clones into `~/meshlink` and prints the same install command. If the broker lives somewhere else, pass `--broker-dir /path/to/broker`.
+
+The installer builds the broker before it changes NetworkManager, hostapd, dnsmasq, or the firewall. A failed install exits nonzero. When the dashboard password is still `change-me`, the installer generates one and saves it in `/etc/meshlink/admin-password`. Pass `--admin-password` to choose it yourself.
+
+When installation finishes, the script prints a `MESHLINK_INSTALL_SUMMARY` block: the Wi-Fi name, channel, and security; the Pi's LAN address and dashboard URLs; the admin password; and the file that holds the tiers visitors see. The same block is saved at `/etc/meshlink/install-summary.txt`.
 
 ### Stripe Payments (Optional)
 

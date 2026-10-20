@@ -44,6 +44,8 @@ TLS_KEY="/etc/meshlink/tls/portal.key"
 TLS_TRUSTED="0"
 TLS_CERT_SRC=""
 TLS_KEY_SRC=""
+BROKER_DIR=""
+ADMIN_PASSWORD=""
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -64,6 +66,8 @@ Options:
   --portal-host HOST     Hostname served over HTTPS (default: portal.meshlink)
   --tls-cert FILE        Publicly-trusted certificate (PEM). Implies trusted TLS.
   --tls-key FILE         Matching private key (PEM). Required with --tls-cert.
+  --broker-dir DIR       Broker checkout. Default: ../broker next to this script.
+  --admin-password PASS  Dashboard password. Generated when the config still says change-me.
   --list-interfaces      Show detected network interfaces and exit
   -h, --help             Show this help
 
@@ -155,6 +159,16 @@ while [ "$#" -gt 0 ]; do
         --tls-key)
             [ "$#" -ge 2 ] || fail "--tls-key requires a file path"
             TLS_KEY_SRC="$2"
+            shift 2
+            ;;
+        --broker-dir)
+            [ "$#" -ge 2 ] || fail "--broker-dir requires a directory"
+            BROKER_DIR="$2"
+            shift 2
+            ;;
+        --admin-password)
+            [ "$#" -ge 2 ] || fail "--admin-password requires a password"
+            ADMIN_PASSWORD="$2"
             shift 2
             ;;
         --list-interfaces)
@@ -273,7 +287,73 @@ MESHLINK_TLS_TRUSTED=$TLS_TRUSTED
 CONFEOF
 sudo chmod 644 "$CONFIG_FILE"
 
-# ─── 2. Stop services while configuring ───────────────────────────────────────
+# ─── 2. Build the broker before changing the network ─────────────────────────
+# A failed npm install or build must leave NetworkManager, hostapd, dnsmasq,
+# and the firewall untouched.
+
+if ! command -v node &>/dev/null; then
+    info "Installing Node.js 20..."
+    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+    sudo apt install -y nodejs
+fi
+ok "Node.js $(node --version)"
+
+if [ -z "$BROKER_DIR" ]; then
+    BROKER_DIR="$(cd "$(dirname "$0")/../broker" 2>/dev/null && pwd)" || true
+fi
+[ -n "$BROKER_DIR" ] && [ -f "$BROKER_DIR/package.json" ] || fail "Broker not found. Clone https://github.com/meshlinkfoundation/broker.git next to this repo, or pass --broker-dir."
+
+info "Building meshlink broker..."
+(
+    cd "$BROKER_DIR"
+    if [ -f package-lock.json ]; then
+        npm ci
+    else
+        npm install
+    fi
+    npm run build
+)
+ok "Broker built"
+
+BROKER_CONFIG="$BROKER_DIR/server/config/meshlink-config.json"
+[ -f "$BROKER_CONFIG" ] || fail "Broker config not found: $BROKER_CONFIG"
+if [ -z "$ADMIN_PASSWORD" ]; then
+    ADMIN_PASSWORD=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20)
+    ADMIN_PASSWORD_GENERATED=1
+else
+    ADMIN_PASSWORD_GENERATED=0
+fi
+ADMIN_PASSWORD_RESULT=$(ADMIN_PASSWORD="$ADMIN_PASSWORD" ADMIN_EXPLICIT="$ADMIN_PASSWORD_GENERATED" python3 - "$BROKER_CONFIG" <<'PY'
+import json, os, sys
+path, password = sys.argv[1], os.environ["ADMIN_PASSWORD"]
+explicit = os.environ["ADMIN_EXPLICIT"] == "0"
+with open(path) as handle:
+    data = json.load(handle)
+admin = data.setdefault("admin", {})
+current = str(admin.get("password") or "")
+if explicit or current in ("", "change-me"):
+    admin["password"] = password
+    admin["dashboardEnabled"] = True
+    with open(path, "w") as handle:
+        json.dump(data, handle, indent=2)
+        handle.write("\n")
+    print("set")
+else:
+    print("kept")
+PY
+)
+SAVED_ADMIN_PASSWORD=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["admin"]["password"])' "$BROKER_CONFIG")
+sudo mkdir -p /etc/meshlink
+printf '%s\n' "$SAVED_ADMIN_PASSWORD" | sudo tee /etc/meshlink/admin-password >/dev/null
+sudo chmod 600 /etc/meshlink/admin-password
+unset ADMIN_PASSWORD SAVED_ADMIN_PASSWORD
+if [ "$ADMIN_PASSWORD_RESULT" = "kept" ]; then
+    ok "Existing admin password left unchanged"
+else
+    ok "Broker admin password ready"
+fi
+
+# ─── 3. Stop services while configuring ───────────────────────────────────────
 
 sudo systemctl stop hostapd 2>/dev/null || true
 sudo systemctl stop dnsmasq 2>/dev/null || true
@@ -530,39 +610,18 @@ sudo systemctl restart meshlink-network.service
 sudo systemctl start hostapd
 sudo systemctl start dnsmasq
 
-# ─── 12. Install Node.js & deploy broker ─────────────────────────────────────
+# ─── 12. Install the broker service ──────────────────────────────────────────
 
-if ! command -v node &>/dev/null; then
-    info "Installing Node.js 20..."
-    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-    sudo apt install -y nodejs
-fi
-ok "Node.js $(node --version)"
-
-BROKER_DIR="$(cd "$(dirname "$0")/../broker" 2>/dev/null && pwd)" || true
-
-if [ -d "$BROKER_DIR" ]; then
-    info "Building meshlink broker..."
-    cd "$BROKER_DIR"
-
-    # Remove macOS-specific esbuild if present
-    sed -i '/@esbuild\/darwin-arm64/d' package.json 2>/dev/null || true
-
-    npm install
-    npm run build
-
-    # Sudoers for broker network management
-    CURRENT_USER=$(whoami)
-    sudo chown root:"$CURRENT_USER" "$TLS_KEY" "$TLS_CERT"
-    sudo chmod 640 "$TLS_KEY"
-    sudo chmod 644 "$TLS_CERT"
-    sudo tee /etc/sudoers.d/meshlink-network > /dev/null <<SUDEOF
+CURRENT_USER=$(whoami)
+sudo chown root:"$CURRENT_USER" "$TLS_KEY" "$TLS_CERT"
+sudo chmod 640 "$TLS_KEY"
+sudo chmod 644 "$TLS_CERT"
+sudo tee /etc/sudoers.d/meshlink-network > /dev/null <<SUDEOF
 $CURRENT_USER ALL=(root) NOPASSWD: /usr/sbin/iptables, /usr/sbin/ipset, /usr/sbin/iptables-save, /usr/sbin/iptables-restore, /usr/sbin/tc
 SUDEOF
-    sudo chmod 440 /etc/sudoers.d/meshlink-network
+sudo chmod 440 /etc/sudoers.d/meshlink-network
 
-    # Create broker service
-    sudo tee /etc/systemd/system/meshlink-broker.service > /dev/null <<BRKEOF
+sudo tee /etc/systemd/system/meshlink-broker.service > /dev/null <<BRKEOF
 [Unit]
 Description=meshlink Broker
 After=network.target meshlink-network.service hostapd.service dnsmasq.service
@@ -583,15 +642,11 @@ Environment=PORT=$BROKER_PORT
 WantedBy=multi-user.target
 BRKEOF
 
-    sudo systemctl daemon-reload
-    sudo systemctl enable meshlink-broker
-    sudo systemctl restart meshlink-broker
-    sleep 2
-    ok "Broker running on port $BROKER_PORT"
-else
-    warn "Broker directory not found at $BROKER_DIR - skipping broker setup"
-    echo "  Deploy the broker manually, then create the meshlink-broker service."
-fi
+sudo systemctl daemon-reload
+sudo systemctl enable meshlink-broker
+sudo systemctl restart meshlink-broker
+sleep 2
+ok "Broker service started"
 
 # ─── 13. Verify ──────────────────────────────────────────────────────────────
 
@@ -608,14 +663,28 @@ for svc in meshlink-network hostapd dnsmasq; do
     fi
 done
 
-systemctl is-active --quiet meshlink-broker && ok "meshlink-broker running" || warn "meshlink-broker not running"
+if systemctl is-active --quiet meshlink-broker; then
+    ok "meshlink-broker running"
+else
+    warn "meshlink-broker not running"
+    ERRORS=$((ERRORS + 1))
+fi
 
-ip addr show "$GUEST_BRIDGE" 2>/dev/null | grep -q "$AP_IP" && ok "$GUEST_BRIDGE has $AP_IP" || warn "$GUEST_BRIDGE missing IP"
-[ "$(cat /proc/sys/net/ipv4/ip_forward)" = "1" ] && ok "IP forwarding on" || warn "IP forwarding off"
+if ip addr show "$GUEST_BRIDGE" 2>/dev/null | grep -q "$AP_IP"; then
+    ok "$GUEST_BRIDGE has $AP_IP"
+else
+    warn "$GUEST_BRIDGE missing IP"
+fi
+if [ "$(cat /proc/sys/net/ipv4/ip_forward)" = "1" ]; then
+    ok "IP forwarding on"
+else
+    warn "IP forwarding off"
+fi
 if curl -sk --max-time 5 "https://127.0.0.1:${TLS_PORT}/api/health" > /dev/null 2>&1; then
     ok "Portal HTTPS listening on :$TLS_PORT"
 else
     warn "Portal HTTPS not reachable on 127.0.0.1:$TLS_PORT"
+    ERRORS=$((ERRORS + 1))
 fi
 
 # Verify Pi's own DNS still works (the bug that broke SSH last time)
@@ -627,27 +696,123 @@ fi
 
 echo "────────────────────────────────────────"
 
-if [ "$ERRORS" -eq 0 ]; then
+LAN_IP=$(/usr/sbin/ip -4 -o addr show dev "$WAN_IFACE" 2>/dev/null | awk '{print $4}' | head -n 1 || true)
+LAN_IP=${LAN_IP%%/*}
+NODE_HOSTNAME=$(hostname 2>/dev/null || echo meshlink)
+if [ "$TLS_TRUSTED" = "1" ]; then
+    TLS_STATUS="trusted certificate"
+else
+    TLS_STATUS="self-signed (phones stay on HTTP until a trusted cert is installed)"
+fi
+
+SUMMARY=$(
+    BROKER_DIR="$BROKER_DIR" \
+    SSID="$SSID" \
+    SECURITY_MODE="$SECURITY_MODE" \
+    SECURITY_DESCRIPTION="$SECURITY_DESCRIPTION" \
+    CHANNEL="$CHANNEL" \
+    COUNTRY_CODE="$COUNTRY_CODE" \
+    WLAN_IFACE="$WLAN_IFACE" \
+    WAN_IFACE="$WAN_IFACE" \
+    GUEST_BRIDGE="$GUEST_BRIDGE" \
+    AP_IP="$AP_IP" \
+    DHCP_RANGE_START="$DHCP_RANGE_START" \
+    DHCP_RANGE_END="$DHCP_RANGE_END" \
+    DHCP_LEASE="$DHCP_LEASE" \
+    BROKER_PORT="$BROKER_PORT" \
+    TLS_PORT="$TLS_PORT" \
+    PORTAL_HOST="$PORTAL_HOST" \
+    TLS_STATUS="$TLS_STATUS" \
+    LAN_IP="$LAN_IP" \
+    NODE_HOSTNAME="$NODE_HOSTNAME" \
+    CURRENT_USER="$CURRENT_USER" \
+    python3 - <<'PY'
+import json, os
+
+broker = os.environ["BROKER_DIR"]
+config_path = os.path.join(broker, "server", "config", "meshlink-config.json")
+profiles_dir = os.path.join(broker, "server", "config", "profiles")
+active_path = os.path.join(broker, "server", "config", "active-profile.json")
+data = json.load(open(config_path))
+profile_id = "default"
+try:
+    profile_id = json.load(open(active_path)).get("profileId") or "default"
+except (OSError, json.JSONDecodeError):
+    profile_id = "default"
+
+tiers = data.get("pricing", {}).get("tiers", [])
+tier_file = config_path
+profile_name = "Default node configuration"
+if profile_id != "default":
+    candidate = os.path.join(profiles_dir, profile_id + ".json")
+    if os.path.isfile(candidate):
+        profile = json.load(open(candidate))
+        tiers = profile.get("pricing", {}).get("tiers", tiers)
+        tier_file = candidate
+        profile_name = profile.get("name") or profile_id
+
+def money(tier):
+    if tier.get("isFree"):
+        return "Free"
+    amount = tier.get("fiatPrice")
+    if isinstance(amount, (int, float)):
+        if float(amount).is_integer():
+            return f"${int(amount)}"
+        return f"${amount:.2f}"
+    return "Paid"
+
+lan_ip = os.environ.get("LAN_IP") or "unavailable"
+ap_ip = os.environ["AP_IP"]
+port = os.environ["BROKER_PORT"]
+password = str((data.get("admin") or {}).get("password") or "")
+node = data.get("nodeInfo") or {}
+
+print("MESHLINK_INSTALL_SUMMARY")
+print("Wi-Fi")
+print(f"  SSID: {os.environ['SSID']}")
+print(f"  Security: {os.environ['SECURITY_MODE']} ({os.environ['SECURITY_DESCRIPTION']})")
+print(f"  Channel: {os.environ['CHANNEL']} (2.4 GHz, country {os.environ['COUNTRY_CODE']})")
+print(f"  Radio: {os.environ['WLAN_IFACE']}")
+print(f"  Guest bridge: {os.environ['GUEST_BRIDGE']}")
+print(f"  Guest gateway: {ap_ip}/24")
+print(f"  DHCP: {os.environ['DHCP_RANGE_START']}-{os.environ['DHCP_RANGE_END']}, lease {os.environ['DHCP_LEASE']}")
+print("Where to use it")
+print(f"  Pi hostname: {os.environ['NODE_HOSTNAME']}")
+print(f"  Pi LAN address ({os.environ['WAN_IFACE']}): {lan_ip}")
+print(f"  SSH: {os.environ['CURRENT_USER']}@{lan_ip}")
+print(f"  Portal for phones on the Wi-Fi: http://{ap_ip}:{port}")
+print(f"  Admin dashboard from the Pi LAN: http://{lan_ip}:{port}/admin")
+print(f"  Admin dashboard from the Wi-Fi: http://{ap_ip}:{port}/admin")
+print(f"  Portal hostname: https://{os.environ['PORTAL_HOST']}/")
+print(f"  TLS: {os.environ['TLS_STATUS']} on port {os.environ['TLS_PORT']}")
+print(f"  Broker directory: {broker}")
+print("Admin")
+print(f"  Password: {password}")
+print("  Password file: /etc/meshlink/admin-password")
+print("Tiers")
+print(f"  Active profile: {profile_name} ({profile_id})")
+print(f"  Tiers in use: {tier_file}")
+print(f"  Default tiers: {config_path}")
+print(f"  Other profiles: {profiles_dir}")
+print(f"  Node name: {node.get('name', '')}")
+print(f"  Location: {node.get('location', '')}")
+print(f"  Operator: {node.get('operator', '')}")
+for tier in tiers:
+    if tier.get("enabled") is False:
+        continue
+    speed = tier.get("speedMbps", "")
+    button = tier.get("buttonText") or ""
+    print(f"  - {tier.get('name')}: {money(tier)} · {speed} Mbps · button \"{button}\"")
+print("Phones join the SSID with no Wi-Fi password. Internet stays blocked until the portal grants access.")
+PY
+)
+
+printf '%s\n' "$SUMMARY"
+sudo mkdir -p /etc/meshlink
+printf '%s\n' "$SUMMARY" | sudo tee /etc/meshlink/install-summary.txt >/dev/null
+sudo chmod 600 /etc/meshlink/install-summary.txt
+
+if [ "$ERRORS" -ne 0 ]; then
     echo ""
-    echo "============================================"
-    echo "  meshlink WiFi Gateway Ready!"
-    echo "============================================"
-    echo "  SSID:       $SSID"
-    echo "  Security:   $SECURITY_DESCRIPTION"
-    echo "  AP device:  $WLAN_IFACE"
-    echo "  Guest LAN:  $GUEST_BRIDGE ($HALOW_IFACE joins when present)"
-    echo "  WAN device: $WAN_IFACE"
-    echo "  Portal:     http://$AP_IP:$BROKER_PORT"
-    echo "  HTTPS:      https://$PORTAL_HOST/"
-    if [ "$TLS_TRUSTED" = "1" ]; then
-        echo "  TLS:        trusted certificate (phones will upgrade to HTTPS)"
-    else
-        echo "  TLS:        self-signed (detection stays HTTP; add --tls-cert for trusted HTTPS)"
-    fi
-    echo "============================================"
-    echo ""
-    echo "  Clients join without a WiFi password."
-    echo "  Internet remains blocked until portal authorization."
-    echo "  Detection stays on HTTP. The portal hostname is HTTPS."
-    echo ""
+    fail "Installation finished with $ERRORS error(s)"
 fi

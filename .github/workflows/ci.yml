@@ -1,0 +1,25 @@
+name: CI
+
+permissions:
+  contents: read
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  shell:
+    name: shellcheck on Debian 13
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:trixie
+      options: --user root
+    steps:
+      - name: Install git and shellcheck
+        run: apt-get update && apt-get install -y git ca-certificates shellcheck
+
+      - uses: actions/checkout@v4
+
+      - name: Lint installer scripts
+        run: shellcheck -s bash install.sh bootstrap.sh && shellcheck -s sh scripts/meshlink-guest-up.sh
