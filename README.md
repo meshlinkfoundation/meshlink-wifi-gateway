@@ -55,9 +55,9 @@ cd meshlink-wifi-gateway
 bash install.sh
 ```
 
-`bootstrap.sh` does those two clones into `~/meshlink` and prints the same install command. If the broker lives somewhere else, pass `--broker-dir /path/to/broker`.
+`bootstrap.sh` clones both into `~/meshlink` and then runs `install.sh`. It does not install Node itself. Do not `apt install nodejs npm` first: Debian's `npm` package is a metapackage, and the installer replaces it with Node.js 20 from NodeSource. If the broker lives somewhere else, pass `--broker-dir /path/to/broker`.
 
-The installer builds the broker before it changes NetworkManager, hostapd, dnsmasq, or the firewall. A failed install exits nonzero. When the dashboard password is still `change-me`, the installer generates one and saves it in `/etc/meshlink/admin-password`. Pass `--admin-password` to choose it yourself.
+When a prebuilt broker for this commit is published, the installer downloads that `dist` and installs runtime packages only. Otherwise it builds on the Pi. Either way, that happens before it changes NetworkManager, hostapd, dnsmasq, or the firewall. A failed install exits nonzero. A fresh node signs in to the dashboard with the password `admin`. Change it from the dashboard after you log in. Pass `--admin-password` to choose a different one during install. A password that was already changed is left alone. The password in use is also saved in `/etc/meshlink/admin-password`.
 
 When installation finishes, the script prints a `MESHLINK_INSTALL_SUMMARY` block: the Wi-Fi name, channel, and security; the Pi's LAN address and dashboard URLs; the admin password; and the file that holds the tiers visitors see. The same block is saved at `/etc/meshlink/install-summary.txt`.
 

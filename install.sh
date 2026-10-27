@@ -68,7 +68,7 @@ Options:
   --tls-cert FILE        Publicly-trusted certificate (PEM). Implies trusted TLS.
   --tls-key FILE         Matching private key (PEM). Required with --tls-cert.
   --broker-dir DIR       Broker checkout. Default: ../broker next to this script.
-  --admin-password PASS  Dashboard password. Generated when the config still says change-me.
+  --admin-password PASS  Dashboard password. Default is admin. An existing password is kept.
   --list-interfaces      Show detected network interfaces and exit
   -h, --help             Show this help
 
@@ -294,10 +294,24 @@ sudo chmod 644 "$CONFIG_FILE"
 # A failed npm install or build must leave NetworkManager, hostapd, dnsmasq,
 # and the firewall untouched.
 
-if ! command -v node &>/dev/null; then
-    info "Installing Node.js 20..."
+node_major() {
+    node -p "Number(process.versions.node.split('.')[0])" 2>/dev/null || echo 0
+}
+
+# Debian's npm package is a metapackage (eslint, gyp, headers). NodeSource's
+# nodejs package already includes npm. Never apt-install the Debian npm package.
+if ! command -v node >/dev/null || [ "$(node_major)" -lt 20 ] || dpkg-query -W npm >/dev/null 2>&1; then
+    info "Installing Node.js 20 from NodeSource..."
+    if dpkg-query -W npm >/dev/null 2>&1; then
+        sudo apt-get remove -y npm
+    fi
     curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-    sudo apt install -y nodejs
+    sudo apt-get install -y nodejs
+fi
+command -v node >/dev/null || fail "Node.js was not installed"
+[ "$(node_major)" -ge 20 ] || fail "Node.js 20 or newer is required (found $(node --version))"
+if dpkg-query -W npm >/dev/null 2>&1; then
+    fail "Debian's npm package is still installed. The installer uses NodeSource Node.js, which includes npm."
 fi
 ok "Node.js $(node --version)"
 
@@ -306,30 +320,61 @@ if [ -z "$BROKER_DIR" ]; then
 fi
 [ -n "$BROKER_DIR" ] && [ -f "$BROKER_DIR/package.json" ] || fail "Broker not found. Clone https://github.com/meshlinkfoundation/broker.git next to this repo, or pass --broker-dir."
 
-info "Building meshlink broker..."
+info "Installing meshlink broker..."
 (
     cd "$BROKER_DIR"
-    if [ -f package-lock.json ]; then
-        npm ci
+    use_prebuilt=0
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1 && [ -z "$(git status --porcelain)" ]; then
+        broker_sha=$(git rev-parse HEAD)
+        prebuilt_url="https://github.com/meshlinkfoundation/broker/releases/download/dist/broker-dist-${broker_sha}.tar.gz"
+        prebuilt_file=$(mktemp)
+        if curl -fsSL "$prebuilt_url" -o "$prebuilt_file" && curl -fsSL "${prebuilt_url}.sha256" -o "${prebuilt_file}.sha256"; then
+            expected=$(awk 'NR==1 { print $1 }' "${prebuilt_file}.sha256")
+            actual=$(sha256sum "$prebuilt_file" | awk '{ print $1 }')
+            if [ -n "$expected" ] && [ "$expected" = "$actual" ]; then
+                tar -xzf "$prebuilt_file"
+                use_prebuilt=1
+                ok "Using prebuilt broker ${broker_sha}"
+            else
+                warn "Prebuilt broker checksum did not match; building locally"
+            fi
+        else
+            warn "No prebuilt broker for ${broker_sha}; building locally"
+        fi
+        rm -f "$prebuilt_file" "${prebuilt_file}.sha256"
     else
-        npm install
+        info "Building the broker from this checkout"
     fi
-    npm run build
+    if [ -f package-lock.json ]; then
+        if [ "$use_prebuilt" = 1 ]; then
+            npm ci --omit=dev --no-audit --no-fund
+        else
+            npm ci --no-audit --no-fund
+            npm run build
+        fi
+    else
+        if [ "$use_prebuilt" = 1 ]; then
+            npm install --omit=dev --no-audit --no-fund
+        else
+            npm install --no-audit --no-fund
+            npm run build
+        fi
+    fi
 )
-ok "Broker built"
+ok "Broker ready"
 
 BROKER_CONFIG="$BROKER_DIR/server/config/meshlink-config.json"
 [ -f "$BROKER_CONFIG" ] || fail "Broker config not found: $BROKER_CONFIG"
 if [ -z "$ADMIN_PASSWORD" ]; then
-    ADMIN_PASSWORD=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20)
-    ADMIN_PASSWORD_GENERATED=1
+    ADMIN_PASSWORD="admin"
+    ADMIN_EXPLICIT=0
 else
-    ADMIN_PASSWORD_GENERATED=0
+    ADMIN_EXPLICIT=1
 fi
-ADMIN_PASSWORD_RESULT=$(ADMIN_PASSWORD="$ADMIN_PASSWORD" ADMIN_EXPLICIT="$ADMIN_PASSWORD_GENERATED" python3 - "$BROKER_CONFIG" <<'PY'
+ADMIN_PASSWORD_RESULT=$(ADMIN_PASSWORD="$ADMIN_PASSWORD" ADMIN_EXPLICIT="$ADMIN_EXPLICIT" python3 - "$BROKER_CONFIG" <<'PY'
 import json, os, sys
 path, password = sys.argv[1], os.environ["ADMIN_PASSWORD"]
-explicit = os.environ["ADMIN_EXPLICIT"] == "0"
+explicit = os.environ["ADMIN_EXPLICIT"] == "1"
 with open(path) as handle:
     data = json.load(handle)
 admin = data.setdefault("admin", {})
@@ -806,6 +851,7 @@ print(f"  Broker directory: {broker}")
 print("Admin")
 print(f"  Password: {password}")
 print("  Password file: /etc/meshlink/admin-password")
+print("  Change it from the admin dashboard after you sign in.")
 print("Tiers")
 print(f"  Active profile: {profile_name} ({profile_id})")
 print(f"  Tiers in use: {tier_file}")

@@ -1,9 +1,14 @@
 #!/bin/bash
-# Clone the gateway and the broker side by side, then print the install command.
-# Usage: bash bootstrap.sh [destination]
+# Clone the gateway and the broker side by side, then run the installer.
+# Node.js is installed by install.sh. This script does not install it.
+# Usage: bash bootstrap.sh [destination] [install.sh options...]
 set -euo pipefail
 
-ROOT="${1:-$HOME/meshlink}"
+ROOT="${MESHLINK_ROOT:-$HOME/meshlink}"
+if [ "$#" -gt 0 ] && [ "${1#-}" = "$1" ]; then
+    ROOT="$1"
+    shift
+fi
 mkdir -p "$ROOT"
 
 if [ ! -d "$ROOT/broker/.git" ]; then
@@ -19,13 +24,8 @@ else
 fi
 
 echo ""
-echo "Checkouts are ready."
-echo "  cd $ROOT/meshlink-wifi-gateway"
-echo "  bash install.sh"
-echo ""
+echo "Checkouts are ready. Starting install.sh"
 echo "The installer finds the broker at $ROOT/broker."
-echo "Pass --broker-dir if you keep the checkouts somewhere else."
 echo ""
-echo "The installer sets the WiFi country to US."
-echo "The operator dashboard runs on this Pi at http://<pi-lan-ip>:3000/admin."
-echo "To manage it from another network, set up Tailscale on the Pi (see README)."
+cd "$ROOT/meshlink-wifi-gateway"
+exec bash install.sh "$@"
