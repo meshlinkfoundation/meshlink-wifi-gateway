@@ -298,11 +298,17 @@ node_major() {
     node -p "Number(process.versions.node.split('.')[0])" 2>/dev/null || echo 0
 }
 
+# dpkg-query -W also succeeds for packages dpkg merely knows about (e.g. removed
+# or never installed), so check the actual install status.
+debian_npm_installed() {
+    [ "$(dpkg-query -W -f='${db:Status-Status}' npm 2>/dev/null)" = "installed" ]
+}
+
 # Debian's npm package is a metapackage (eslint, gyp, headers). NodeSource's
 # nodejs package already includes npm. Never apt-install the Debian npm package.
-if ! command -v node >/dev/null || [ "$(node_major)" -lt 20 ] || dpkg-query -W npm >/dev/null 2>&1; then
+if ! command -v node >/dev/null || [ "$(node_major)" -lt 20 ] || debian_npm_installed; then
     info "Installing Node.js 20 from NodeSource..."
-    if dpkg-query -W npm >/dev/null 2>&1; then
+    if debian_npm_installed; then
         sudo apt-get remove -y npm
     fi
     curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
@@ -310,7 +316,7 @@ if ! command -v node >/dev/null || [ "$(node_major)" -lt 20 ] || dpkg-query -W n
 fi
 command -v node >/dev/null || fail "Node.js was not installed"
 [ "$(node_major)" -ge 20 ] || fail "Node.js 20 or newer is required (found $(node --version))"
-if dpkg-query -W npm >/dev/null 2>&1; then
+if debian_npm_installed; then
     fail "Debian's npm package is still installed. The installer uses NodeSource Node.js, which includes npm."
 fi
 ok "Node.js $(node --version)"
