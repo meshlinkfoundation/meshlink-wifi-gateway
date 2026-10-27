@@ -30,6 +30,7 @@ DHCP_RANGE_START="192.168.50.10"
 DHCP_RANGE_END="192.168.50.100"
 DHCP_LEASE="24h"
 CHANNEL=6
+# Wi-Fi regulatory domain. meshlink nodes are deployed in the United States.
 COUNTRY_CODE="US"
 WLAN_IFACE="wlan0"
 WAN_IFACE="eth0"
@@ -220,9 +221,11 @@ echo "  Security:   $SECURITY_DESCRIPTION"
 echo "  Gateway:    $AP_IP"
 echo "  DHCP:       $DHCP_RANGE_START - $DHCP_RANGE_END"
 echo "  Channel:    $CHANNEL"
+echo "  Country:    $COUNTRY_CODE (Wi-Fi regulatory domain)"
 echo "  AP device:  $WLAN_IFACE"
 echo "  WAN device: $WAN_IFACE"
 echo "  Portal:     http://$AP_IP:$BROKER_PORT"
+echo "  Dashboard:  runs on this Pi at :$BROKER_PORT/admin (LAN only; Tailscale for remote)"
 echo "  HTTPS:      https://$PORTAL_HOST/ ($( [ "$TLS_TRUSTED" = "1" ] && echo trusted || echo self-signed ))"
 echo "────────────────────────────────────────"
 
@@ -385,6 +388,16 @@ fi
 
 # ─── 4. Unblock WiFi & bring up the AP interface ────────────────────────────
 # Must happen AFTER NetworkManager restart (NM can re-block the radio)
+
+# Raspberry Pi OS keeps WiFi soft-blocked until a country is set. Set the
+# regulatory domain now and persist it so the radio comes up on every boot.
+info "Setting WiFi country to $COUNTRY_CODE..."
+if command -v raspi-config > /dev/null 2>&1; then
+    sudo raspi-config nonint do_wifi_country "$COUNTRY_CODE" || warn "raspi-config could not set the WiFi country"
+fi
+echo "options cfg80211 ieee80211_regdom=$COUNTRY_CODE" | sudo tee /etc/modprobe.d/meshlink-regdom.conf > /dev/null
+sudo iw reg set "$COUNTRY_CODE" || warn "iw could not set the regulatory domain"
+ok "WiFi country set to $COUNTRY_CODE"
 
 info "Unblocking WiFi..."
 sudo /usr/sbin/rfkill unblock wlan
@@ -781,8 +794,12 @@ print(f"  Pi hostname: {os.environ['NODE_HOSTNAME']}")
 print(f"  Pi LAN address ({os.environ['WAN_IFACE']}): {lan_ip}")
 print(f"  SSH: {os.environ['CURRENT_USER']}@{lan_ip}")
 print(f"  Portal for phones on the Wi-Fi: http://{ap_ip}:{port}")
-print(f"  Admin dashboard from the Pi LAN: http://{lan_ip}:{port}/admin")
-print(f"  Admin dashboard from the Wi-Fi: http://{ap_ip}:{port}/admin")
+print("Operator dashboard")
+print("  Runs on this Pi, served by the broker. Nothing to install elsewhere.")
+print(f"  Open it from a device on the Pi's LAN: http://{lan_ip}:{port}/admin")
+print("  Guests on the meshlink Wi-Fi cannot reach it.")
+print("  To reach it from another network, install Tailscale on the Pi and open")
+print(f"  http://<pi-tailscale-ip>:{port}/admin (see README: Remote Management with Tailscale).")
 print(f"  Portal hostname: https://{os.environ['PORTAL_HOST']}/")
 print(f"  TLS: {os.environ['TLS_STATUS']} on port {os.environ['TLS_PORT']}")
 print(f"  Broker directory: {broker}")

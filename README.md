@@ -61,6 +61,18 @@ The installer builds the broker before it changes NetworkManager, hostapd, dnsma
 
 When installation finishes, the script prints a `MESHLINK_INSTALL_SUMMARY` block: the Wi-Fi name, channel, and security; the Pi's LAN address and dashboard URLs; the admin password; and the file that holds the tiers visitors see. The same block is saved at `/etc/meshlink/install-summary.txt`.
 
+The installer assumes the node is in the United States. It sets the WiFi country (regulatory domain) to `US` for hostapd and for the Pi itself, which also clears the soft block Raspberry Pi OS keeps on WiFi until a country is set.
+
+### Operator Dashboard
+
+The operator dashboard runs on the Pi. The broker serves it at `/admin` on port 3000; there is nothing to install on another machine. Open it from a device on the same local network as the Pi's WAN side:
+
+```
+http://<pi-lan-ip>:3000/admin
+```
+
+Guests on the meshlink WiFi cannot reach it — the broker returns 404 for `/admin` to clients on the guest network. To reach the dashboard from anywhere else, set up Tailscale as described below.
+
 ### Stripe Payments (Optional)
 
 To accept paid tiers via Stripe, create a `.env` file in the broker directory before running the installer (or any time after):
@@ -74,7 +86,7 @@ The broker service loads this file via `EnvironmentFile`. See `broker/STRIPE_SET
 
 ### Remote Management with Tailscale (Optional)
 
-By default, the operator dashboard at `http://192.168.50.1:3000/admin` is only accessible from devices connected to the meshlink AP or your local network. If you want to manage your node remotely — from a different network, on the go, etc. — you'll need a way to reach it. [Tailscale](https://tailscale.com) is a simple option that creates a private mesh VPN between your devices.
+By default, the operator dashboard runs on the Pi and is only reachable at `http://<pi-lan-ip>:3000/admin` from your local network. If you want to manage your node remotely — from a different network, on the go, etc. — you'll need a way to reach it. [Tailscale](https://tailscale.com) is a simple option that creates a private mesh VPN between your devices.
 
 ```bash
 # On the Pi: install and authenticate
@@ -107,6 +119,7 @@ Without Tailscale (or a similar solution like a VPN or reverse tunnel), you must
 | AP IP / Gateway | `192.168.50.1` |
 | DHCP range | `192.168.50.10` - `192.168.50.100` |
 | Channel | 6 (2.4 GHz) |
+| WiFi country | `US` |
 | AP interface | `wlan0` by default; the field Pi uses the Alfa on `wlan1` |
 | Guest bridge | `br-guest` holds `192.168.50.1`; the Alfa and HaLow USB Ethernet (`eth1`) are members |
 | WAN interface | `eth0` |
