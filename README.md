@@ -78,7 +78,7 @@ Guests on the meshlink WiFi cannot reach it — the broker returns 404 for `/adm
 To accept paid tiers via Stripe, create a `.env` file in the broker directory before running the installer (or any time after):
 
 ```bash
-echo "STRIPE_SECRET_KEY=sk_test_yourKeyHere" > /home/meshlink/meshlink/broker/.env
+echo "STRIPE_SECRET_KEY=<your-stripe-test-secret-key>" > /home/meshlink/meshlink/broker/.env
 sudo systemctl restart meshlink-broker
 ```
 
