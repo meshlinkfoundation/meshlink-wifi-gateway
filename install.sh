@@ -15,6 +15,7 @@
 # Usage: bash install.sh [--ap-interface IFACE] [--wan-interface IFACE]
 #                        [--security open|owe]
 #                        [--portal-host HOST] [--tls-cert FILE] [--tls-key FILE]
+#                        [--lab-qemu --guest-interface IFACE]
 #        bash install.sh --list-interfaces
 
 set -e
@@ -47,6 +48,12 @@ TLS_CERT_SRC=""
 TLS_KEY_SRC=""
 BROKER_DIR=""
 ADMIN_PASSWORD=""
+LAB_QEMU=0
+GUEST_IFACE=""
+TOLLGATE_PORT=2121
+TOLLGATE_MINT_URL="http://10.99.98.2:8383"
+DNS_SERVER_1="8.8.8.8"
+DNS_SERVER_2="8.8.4.4"
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -69,6 +76,12 @@ Options:
   --tls-key FILE         Matching private key (PEM). Required with --tls-cert.
   --broker-dir DIR       Broker checkout. Default: ../broker next to this script.
   --admin-password PASS  Dashboard password. Default is admin. An existing password is kept.
+  --lab-qemu             Lab mode: wired guest bridge, no hostapd/WiFi setup
+  --guest-interface IFACE  Wired guest interface bridged into br-guest (lab mode)
+  --tollgate-port PORT   TollGate HTTP listener port (default: 2121)
+  --mint-url URL         Cashu mint allowed before authentication
+  --dns-server ADDRESS   Upstream DNS server for guest clients (default: 8.8.8.8)
+  --ap-ip ADDRESS        Guest gateway address (default: 192.168.50.1)
   --list-interfaces      Show detected network interfaces and exit
   -h, --help             Show this help
 
@@ -118,12 +131,24 @@ SAVED_SECURITY_MODE=$(read_saved_setting MESHLINK_WIFI_SECURITY)
 SAVED_SSID=$(read_saved_setting MESHLINK_SSID)
 SAVED_PORTAL_HOST=$(read_saved_setting MESHLINK_PORTAL_HOST)
 SAVED_TLS_TRUSTED=$(read_saved_setting MESHLINK_TLS_TRUSTED)
+SAVED_LAB_QEMU=$(read_saved_setting MESHLINK_LAB_QEMU)
+SAVED_GUEST_IFACE=$(read_saved_setting MESHLINK_GUEST_INTERFACE)
+SAVED_TOLLGATE_PORT=$(read_saved_setting MESHLINK_TOLLGATE_PORT)
+SAVED_MINT_URL=$(read_saved_setting MESHLINK_MINT_URL)
+SAVED_AP_IP=$(read_saved_setting MESHLINK_AP_IP)
+SAVED_DNS_SERVER=$(read_saved_setting MESHLINK_DNS_SERVER)
 [ -n "$SAVED_WLAN_IFACE" ] && WLAN_IFACE="$SAVED_WLAN_IFACE"
 [ -n "$SAVED_WAN_IFACE" ] && WAN_IFACE="$SAVED_WAN_IFACE"
 [ -n "$SAVED_SECURITY_MODE" ] && SECURITY_MODE="$SAVED_SECURITY_MODE"
 [ -n "$SAVED_SSID" ] && SSID="$SAVED_SSID"
 [ -n "$SAVED_PORTAL_HOST" ] && PORTAL_HOST="$SAVED_PORTAL_HOST"
 [ -n "$SAVED_TLS_TRUSTED" ] && TLS_TRUSTED="$SAVED_TLS_TRUSTED"
+[ -n "$SAVED_LAB_QEMU" ] && LAB_QEMU="$SAVED_LAB_QEMU"
+[ -n "$SAVED_GUEST_IFACE" ] && GUEST_IFACE="$SAVED_GUEST_IFACE"
+[ -n "$SAVED_TOLLGATE_PORT" ] && TOLLGATE_PORT="$SAVED_TOLLGATE_PORT"
+[ -n "$SAVED_MINT_URL" ] && TOLLGATE_MINT_URL="$SAVED_MINT_URL"
+[ -n "$SAVED_AP_IP" ] && AP_IP="$SAVED_AP_IP"
+[ -n "$SAVED_DNS_SERVER" ] && DNS_SERVER_1="$SAVED_DNS_SERVER"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -172,6 +197,36 @@ while [ "$#" -gt 0 ]; do
             ADMIN_PASSWORD="$2"
             shift 2
             ;;
+        --lab-qemu)
+            LAB_QEMU=1
+            shift
+            ;;
+        --guest-interface)
+            [ "$#" -ge 2 ] || fail "--guest-interface requires a value"
+            GUEST_IFACE="$2"
+            shift 2
+            ;;
+        --tollgate-port)
+            [ "$#" -ge 2 ] || fail "--tollgate-port requires a value"
+            TOLLGATE_PORT="$2"
+            shift 2
+            ;;
+        --mint-url)
+            [ "$#" -ge 2 ] || fail "--mint-url requires a URL"
+            TOLLGATE_MINT_URL="$2"
+            shift 2
+            ;;
+        --ap-ip)
+            [ "$#" -ge 2 ] || fail "--ap-ip requires an address"
+            AP_IP="$2"
+            shift 2
+            ;;
+        --dns-server)
+            [ "$#" -ge 2 ] || fail "--dns-server requires a value"
+            DNS_SERVER_1="$2"
+            DNS_SERVER_2="$2"
+            shift 2
+            ;;
         --list-interfaces)
             list_interfaces
             exit 0
@@ -186,6 +241,25 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+if [ "$LAB_QEMU" = "1" ]; then
+    [ -n "$GUEST_IFACE" ] || fail "--lab-qemu requires --guest-interface"
+    validate_interface_name "Guest" "$GUEST_IFACE"
+    [ -d "/sys/class/net/$GUEST_IFACE" ] || fail "$GUEST_IFACE not found"
+    [ "$GUEST_IFACE" != "$WAN_IFACE" ] || fail "Guest and WAN interfaces must be different"
+    WLAN_IFACE="$GUEST_IFACE"
+    SECURITY_MODE="open"
+    HALOW_IFACE=""
+fi
+[[ "$TOLLGATE_PORT" =~ ^[0-9]{1,5}$ ]] || fail "Invalid --tollgate-port: $TOLLGATE_PORT"
+[ "$TOLLGATE_PORT" -ge 1 ] && [ "$TOLLGATE_PORT" -le 65535 ] || fail "Invalid --tollgate-port: $TOLLGATE_PORT"
+[[ "$TOLLGATE_MINT_URL" =~ ^https?:// ]] || fail "Invalid --mint-url: $TOLLGATE_MINT_URL"
+[[ "$DNS_SERVER_1" =~ ^[0-9a-fA-F:.]+$ ]] || fail "Invalid --dns-server: $DNS_SERVER_1"
+if [ "$LAB_QEMU" = "1" ] && [ "$AP_IP" != "192.168.50.1" ]; then
+    AP_PREFIX="${AP_IP%.*}"
+    DHCP_RANGE_START="$AP_PREFIX.10"
+    DHCP_RANGE_END="$AP_PREFIX.100"
+fi
 
 validate_interface_name "AP" "$WLAN_IFACE"
 validate_interface_name "WAN" "$WAN_IFACE"
@@ -227,11 +301,17 @@ echo "  WAN device: $WAN_IFACE"
 echo "  Portal:     http://$AP_IP:$BROKER_PORT"
 echo "  Dashboard:  runs on this Pi at :$BROKER_PORT/admin (LAN only; Tailscale for remote)"
 echo "  HTTPS:      https://$PORTAL_HOST/ ($( [ "$TLS_TRUSTED" = "1" ] && echo trusted || echo self-signed ))"
+echo "  TollGate:   http://$AP_IP:$TOLLGATE_PORT/ (mint $TOLLGATE_MINT_URL)"
+if [ "$LAB_QEMU" = "1" ]; then
+    echo "  Mode:       lab QEMU (wired guest bridge on $GUEST_IFACE, no hostapd)"
+fi
 echo "────────────────────────────────────────"
 
 [ -d "/sys/class/net/$WLAN_IFACE" ] || fail "$WLAN_IFACE not found"
 [ -d "/sys/class/net/$WAN_IFACE" ] || fail "$WAN_IFACE not found"
-[ -d "/sys/class/net/$WLAN_IFACE/wireless" ] || fail "$WLAN_IFACE is not a wireless interface"
+if [ "$LAB_QEMU" != "1" ]; then
+    [ -d "/sys/class/net/$WLAN_IFACE/wireless" ] || fail "$WLAN_IFACE is not a wireless interface"
+fi
 
 PREVIOUS_WLAN_IFACE="$SAVED_WLAN_IFACE"
 
@@ -239,14 +319,18 @@ PREVIOUS_WLAN_IFACE="$SAVED_WLAN_IFACE"
 
 info "Installing packages..."
 sudo apt update -y
-sudo apt install -y hostapd dnsmasq iptables ipset iw rfkill iproute2 openssl
-ok "Packages installed"
+if [ "$LAB_QEMU" = "1" ]; then
+    sudo apt install -y dnsmasq iptables ipset iproute2 openssl curl
+else
+    sudo apt install -y hostapd dnsmasq iptables ipset iw rfkill iproute2 openssl curl
 
-PHY_NAME=$(basename "$(readlink -f "/sys/class/net/$WLAN_IFACE/phy80211" 2>/dev/null)" 2>/dev/null) || true
-[ -n "$PHY_NAME" ] || fail "Could not determine the wireless radio for $WLAN_IFACE"
-if ! iw phy "$PHY_NAME" info 2>/dev/null | grep -qE '^[[:space:]]*\* AP$'; then
-    fail "$WLAN_IFACE does not report hostapd/AP mode support; check the Alfa chipset driver"
+    PHY_NAME=$(basename "$(readlink -f "/sys/class/net/$WLAN_IFACE/phy80211" 2>/dev/null)" 2>/dev/null) || true
+    [ -n "$PHY_NAME" ] || fail "Could not determine the wireless radio for $WLAN_IFACE"
+    if ! iw phy "$PHY_NAME" info 2>/dev/null | grep -qE '^[[:space:]]*\* AP$'; then
+        fail "$WLAN_IFACE does not report hostapd/AP mode support; check the Alfa chipset driver"
+    fi
 fi
+ok "Packages installed"
 
 # Persist only validated values. This file is also loaded by the broker service.
 sudo mkdir -p /etc/meshlink /etc/meshlink/tls
@@ -287,6 +371,11 @@ MESHLINK_TLS_CERT=$TLS_CERT
 MESHLINK_TLS_KEY=$TLS_KEY
 MESHLINK_TLS_PORT=$TLS_PORT
 MESHLINK_TLS_TRUSTED=$TLS_TRUSTED
+MESHLINK_LAB_QEMU=$LAB_QEMU
+MESHLINK_GUEST_INTERFACE=$GUEST_IFACE
+MESHLINK_TOLLGATE_PORT=$TOLLGATE_PORT
+MESHLINK_MINT_URL=$TOLLGATE_MINT_URL
+MESHLINK_DNS_SERVER=$DNS_SERVER_1
 CONFEOF
 sudo chmod 644 "$CONFIG_FILE"
 
@@ -351,7 +440,11 @@ info "Installing meshlink broker..."
     else
         info "Building the broker from this checkout"
     fi
-    if [ -f package-lock.json ]; then
+    if [ "${MESHLINK_LAB_PREBUILT:-0}" = "1" ]; then
+        [ -f dist/index.js ] || fail "MESHLINK_LAB_PREBUILT=1 but $BROKER_DIR/dist/index.js is missing"
+        npm ci --omit=dev --no-audit --no-fund
+        ok "Using prebuilt lab broker dist"
+    elif [ -f package-lock.json ]; then
         if [ "$use_prebuilt" = 1 ]; then
             npm ci --omit=dev --no-audit --no-fund
         else
@@ -422,8 +515,9 @@ fi
 
 if systemctl is-active --quiet NetworkManager; then
     info "Configuring NetworkManager to ignore $WLAN_IFACE..."
-    NM_UNMANAGED="interface-name:$WLAN_IFACE;interface-name:$GUEST_BRIDGE;interface-name:$HALOW_IFACE"
-    if [ "$WLAN_IFACE" != "wlan0" ]; then
+    NM_UNMANAGED="interface-name:$WLAN_IFACE;interface-name:$GUEST_BRIDGE"
+    [ -n "$HALOW_IFACE" ] && NM_UNMANAGED="$NM_UNMANAGED;interface-name:$HALOW_IFACE"
+    if [ "$LAB_QEMU" != "1" ] && [ "$WLAN_IFACE" != "wlan0" ]; then
         # Keep the unused onboard radio from auto-connecting or scanning beside
         # the external AP. It remains available for a later explicit switch.
         NM_UNMANAGED="$NM_UNMANAGED;interface-name:wlan0"
@@ -440,20 +534,24 @@ fi
 # ─── 4. Unblock WiFi & bring up the AP interface ────────────────────────────
 # Must happen AFTER NetworkManager restart (NM can re-block the radio)
 
-# Raspberry Pi OS keeps WiFi soft-blocked until a country is set. Set the
-# regulatory domain now and persist it so the radio comes up on every boot.
-info "Setting WiFi country to $COUNTRY_CODE..."
-if command -v raspi-config > /dev/null 2>&1; then
-    sudo raspi-config nonint do_wifi_country "$COUNTRY_CODE" || warn "raspi-config could not set the WiFi country"
-fi
-echo "options cfg80211 ieee80211_regdom=$COUNTRY_CODE" | sudo tee /etc/modprobe.d/meshlink-regdom.conf > /dev/null
-sudo iw reg set "$COUNTRY_CODE" || warn "iw could not set the regulatory domain"
-ok "WiFi country set to $COUNTRY_CODE"
+if [ "$LAB_QEMU" != "1" ]; then
+    # Raspberry Pi OS keeps WiFi soft-blocked until a country is set. Set the
+    # regulatory domain now and persist it so the radio comes up on every boot.
+    info "Setting WiFi country to $COUNTRY_CODE..."
+    if command -v raspi-config > /dev/null 2>&1; then
+        sudo raspi-config nonint do_wifi_country "$COUNTRY_CODE" || warn "raspi-config could not set the WiFi country"
+    fi
+    echo "options cfg80211 ieee80211_regdom=$COUNTRY_CODE" | sudo tee /etc/modprobe.d/meshlink-regdom.conf > /dev/null
+    sudo iw reg set "$COUNTRY_CODE" || warn "iw could not set the regulatory domain"
+    ok "WiFi country set to $COUNTRY_CODE"
 
-info "Unblocking WiFi..."
-sudo /usr/sbin/rfkill unblock wlan
-sleep 2
-ok "WiFi unblocked"
+    info "Unblocking WiFi..."
+    sudo /usr/sbin/rfkill unblock wlan
+    sleep 2
+    ok "WiFi unblocked"
+else
+    info "Lab mode: skipping WiFi radio setup"
+fi
 
 # ─── 5. Guest bridge ─────────────────────────────────────────────────────────
 # The AP address lives on br-guest. hostapd enslaves the Alfa radio, and the
@@ -465,7 +563,9 @@ sudo ip link add name "$GUEST_BRIDGE" type bridge 2>/dev/null || true
 sudo ip link set "$GUEST_BRIDGE" up
 sudo ip link set "$WLAN_IFACE" up
 sudo ip addr flush dev "$WLAN_IFACE" || true
-if [ -d "/sys/class/net/$HALOW_IFACE" ]; then
+if [ "$LAB_QEMU" = "1" ]; then
+    sudo ip link set "$GUEST_IFACE" master "$GUEST_BRIDGE"
+elif [ -n "$HALOW_IFACE" ] && [ -d "/sys/class/net/$HALOW_IFACE" ]; then
     sudo ip link set "$HALOW_IFACE" up
     sudo ip addr flush dev "$HALOW_IFACE" || true
     sudo ip link set "$HALOW_IFACE" master "$GUEST_BRIDGE"
@@ -475,6 +575,9 @@ ok "Guest bridge ready"
 
 # ─── 6. hostapd (access point) ───────────────────────────────────────────────
 
+if [ "$LAB_QEMU" = "1" ]; then
+    info "Lab mode: skipping hostapd"
+else
 info "Configuring hostapd..."
 sudo tee /etc/hostapd/hostapd.conf > /dev/null <<HAPEOF
 interface=$WLAN_IFACE
@@ -493,6 +596,7 @@ HAPEOF
 
 [ -f /etc/default/hostapd ] && sudo sed -i 's|#DAEMON_CONF=""|DAEMON_CONF="/etc/hostapd/hostapd.conf"|' /etc/default/hostapd
 ok "hostapd configured"
+fi
 
 # ─── 7. dnsmasq (DHCP + DNS) ─────────────────────────────────────────────────
 # CRITICAL: bind-interfaces + listen-address keeps dnsmasq off localhost
@@ -520,8 +624,8 @@ interface=$GUEST_BRIDGE
 listen-address=$AP_IP
 bind-interfaces
 no-resolv
-server=8.8.8.8
-server=8.8.4.4
+server=$DNS_SERVER_1
+server=$DNS_SERVER_2
 dhcp-range=$DHCP_RANGE_START,$DHCP_RANGE_END,$AP_NETMASK,$DHCP_LEASE
 domain-needed
 bogus-priv
@@ -554,6 +658,13 @@ ok "IP forwarding enabled"
 
 info "Configuring ipset + iptables..."
 
+# TollGate clients must pay the mint before the gate opens. Parse the mint URL
+# once so the pre-auth FORWARD rule matches exactly one host and port.
+TOLLGATE_MINT_HOST=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.urlsplit(sys.argv[1]).hostname or "")' "$TOLLGATE_MINT_URL")
+TOLLGATE_MINT_PORT=$(python3 -c 'import sys,urllib.parse; u=urllib.parse.urlsplit(sys.argv[1]); print(u.port or (443 if u.scheme == "https" else 80))' "$TOLLGATE_MINT_URL")
+[ -n "$TOLLGATE_MINT_HOST" ] || fail "Could not parse mint host from $TOLLGATE_MINT_URL"
+[[ "$TOLLGATE_MINT_PORT" =~ ^[0-9]{1,5}$ ]] || fail "Could not parse mint port from $TOLLGATE_MINT_URL"
+
 # Create ipset with timeout support (timeout 0 = per-entry timeouts enabled, kernel auto-expires)
 sudo ipset create meshlink_auth hash:ip timeout 0 -exist
 
@@ -576,6 +687,7 @@ sudo iptables -A meshlink_input -p udp --dport 67 -j ACCEPT
 sudo iptables -A meshlink_input -p udp --dport 53 -j ACCEPT
 sudo iptables -A meshlink_input -p tcp --dport 53 -j ACCEPT
 sudo iptables -A meshlink_input -p tcp --dport "$BROKER_PORT" -j ACCEPT
+sudo iptables -A meshlink_input -p tcp --dport "$TOLLGATE_PORT" -j ACCEPT
 sudo iptables -A meshlink_input -p tcp --dport 443 -j ACCEPT
 sudo iptables -A meshlink_input -p tcp --dport "$TLS_PORT" -j ACCEPT
 sudo iptables -A meshlink_input -j DROP
@@ -584,6 +696,10 @@ sudo iptables -A meshlink_input -j DROP
 sudo iptables -P FORWARD DROP
 sudo iptables -A FORWARD -i "$GUEST_BRIDGE" -o "$WAN_IFACE" -m set --match-set meshlink_auth src -j ACCEPT
 sudo iptables -A FORWARD -i "$WAN_IFACE" -o "$GUEST_BRIDGE" -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+# TollGate mint: allow guests to fetch and redeem Cashu before authentication.
+# This is the only pre-auth internet destination; everything else stays gated.
+sudo iptables -A FORWARD -i "$GUEST_BRIDGE" -o "$WAN_IFACE" -d "$TOLLGATE_MINT_HOST" -p tcp --dport "$TOLLGATE_MINT_PORT" -j ACCEPT
 
 # ── Captive portal detection ─────────────────────────────────────────────────
 # REJECT HTTPS (port 443) instead of silent DROP — iOS/Android captive portal
@@ -640,6 +756,7 @@ ExecStart=/usr/local/sbin/meshlink-guest-up.sh
 WantedBy=multi-user.target
 SVCEOF
 
+if [ "$LAB_QEMU" != "1" ]; then
 # Attach the HaLow USB Ethernet adapter whenever it appears. Enabling this
 # warns until the adapter is plugged in; the unit still stays enabled.
 sudo tee /etc/systemd/system/meshlink-eth1.service > /dev/null <<ETHEOF
@@ -655,6 +772,7 @@ ExecStart=/bin/sh -c '/usr/sbin/ip link set ${HALOW_IFACE} up; /usr/sbin/ip addr
 [Install]
 WantedBy=sys-subsystem-net-devices-${HALOW_IFACE}.device
 ETHEOF
+fi
 
 ok "Boot service created"
 
@@ -662,16 +780,24 @@ ok "Boot service created"
 
 info "Enabling services..."
 sudo systemctl daemon-reload
-sudo systemctl unmask hostapd
-sudo systemctl enable meshlink-network.service hostapd dnsmasq
-sudo systemctl enable meshlink-eth1.service || warn "HaLow USB Ethernet is not plugged in yet; meshlink-eth1 will attach it when it appears"
+if [ "$LAB_QEMU" = "1" ]; then
+    sudo systemctl enable meshlink-network.service dnsmasq
+    sudo systemctl disable --now hostapd 2>/dev/null || true
+    sudo systemctl disable --now meshlink-eth1.service 2>/dev/null || true
+else
+    sudo systemctl unmask hostapd
+    sudo systemctl enable meshlink-network.service hostapd dnsmasq
+    sudo systemctl enable meshlink-eth1.service || warn "HaLow USB Ethernet is not plugged in yet; meshlink-eth1 will attach it when it appears"
+fi
 # The older unit addresses eth1 as its own 192.168.51.1 LAN. The field gateway
 # bridges that adapter into br-guest instead, so leave it disabled.
 sudo systemctl disable --now meshlink-halow.service 2>/dev/null || true
 
 info "Starting services..."
 sudo systemctl restart meshlink-network.service
-sudo systemctl start hostapd
+if [ "$LAB_QEMU" != "1" ]; then
+    sudo systemctl start hostapd
+fi
 sudo systemctl start dnsmasq
 
 # ─── 12. Install the broker service ──────────────────────────────────────────
@@ -701,6 +827,8 @@ EnvironmentFile=-$BROKER_DIR/.env
 EnvironmentFile=-$CONFIG_FILE
 Environment=NODE_ENV=production
 Environment=PORT=$BROKER_PORT
+Environment=TOLLGATE_PORT=$TOLLGATE_PORT
+Environment=MESHLINK_MINT_URL=$TOLLGATE_MINT_URL
 
 [Install]
 WantedBy=multi-user.target
@@ -709,7 +837,7 @@ BRKEOF
 sudo systemctl daemon-reload
 sudo systemctl enable meshlink-broker
 sudo systemctl restart meshlink-broker
-sleep 2
+sleep 6
 ok "Broker service started"
 
 # ─── 13. Verify ──────────────────────────────────────────────────────────────
@@ -718,7 +846,12 @@ echo ""
 echo "────────────────────────────────────────"
 ERRORS=0
 
-for svc in meshlink-network hostapd dnsmasq; do
+if [ "$LAB_QEMU" = "1" ]; then
+    VERIFY_SERVICES="meshlink-network dnsmasq"
+else
+    VERIFY_SERVICES="meshlink-network hostapd dnsmasq"
+fi
+for svc in $VERIFY_SERVICES; do
     if systemctl is-active --quiet "$svc"; then
         ok "$svc running"
     else
@@ -734,6 +867,21 @@ else
     ERRORS=$((ERRORS + 1))
 fi
 
+TOLLGATE_OK=0
+for _ in $(seq 1 15); do
+    if curl -fsS --max-time 3 "http://127.0.0.1:${TOLLGATE_PORT}/" > /dev/null 2>&1; then
+        TOLLGATE_OK=1
+        break
+    fi
+    sleep 2
+done
+if [ "$TOLLGATE_OK" = "1" ]; then
+    ok "TollGate listener on :$TOLLGATE_PORT"
+else
+    warn "TollGate listener not reachable on 127.0.0.1:$TOLLGATE_PORT"
+    ERRORS=$((ERRORS + 1))
+fi
+
 if ip addr show "$GUEST_BRIDGE" 2>/dev/null | grep -q "$AP_IP"; then
     ok "$GUEST_BRIDGE has $AP_IP"
 else
@@ -744,7 +892,15 @@ if [ "$(cat /proc/sys/net/ipv4/ip_forward)" = "1" ]; then
 else
     warn "IP forwarding off"
 fi
-if curl -sk --max-time 5 "https://127.0.0.1:${TLS_PORT}/api/health" > /dev/null 2>&1; then
+PORTAL_OK=0
+for _ in $(seq 1 15); do
+    if curl -sk --max-time 3 "https://127.0.0.1:${TLS_PORT}/api/health" > /dev/null 2>&1; then
+        PORTAL_OK=1
+        break
+    fi
+    sleep 2
+done
+if [ "$PORTAL_OK" = "1" ]; then
     ok "Portal HTTPS listening on :$TLS_PORT"
 else
     warn "Portal HTTPS not reachable on 127.0.0.1:$TLS_PORT"
@@ -784,6 +940,8 @@ SUMMARY=$(
     DHCP_RANGE_END="$DHCP_RANGE_END" \
     DHCP_LEASE="$DHCP_LEASE" \
     BROKER_PORT="$BROKER_PORT" \
+    TOLLGATE_PORT="$TOLLGATE_PORT" \
+    TOLLGATE_MINT_URL="$TOLLGATE_MINT_URL" \
     TLS_PORT="$TLS_PORT" \
     PORTAL_HOST="$PORTAL_HOST" \
     TLS_STATUS="$TLS_STATUS" \
@@ -853,6 +1011,7 @@ print("  To reach it from another network, install Tailscale on the Pi and open"
 print(f"  http://<pi-tailscale-ip>:{port}/admin (see README: Remote Management with Tailscale).")
 print(f"  Portal hostname: https://{os.environ['PORTAL_HOST']}/")
 print(f"  TLS: {os.environ['TLS_STATUS']} on port {os.environ['TLS_PORT']}")
+print(f"  TollGate: http://{ap_ip}:{os.environ['TOLLGATE_PORT']}/ (mint {os.environ['TOLLGATE_MINT_URL']})")
 print(f"  Broker directory: {broker}")
 print("Admin")
 print(f"  Password: {password}")
