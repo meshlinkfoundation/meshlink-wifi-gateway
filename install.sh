@@ -52,6 +52,8 @@ LAB_QEMU=0
 GUEST_IFACE=""
 TOLLGATE_PORT=2121
 TOLLGATE_MINT_URL="http://10.99.98.2:8383"
+DNS_SERVER_1="8.8.8.8"
+DNS_SERVER_2="8.8.4.4"
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -78,6 +80,7 @@ Options:
   --guest-interface IFACE  Wired guest interface bridged into br-guest (lab mode)
   --tollgate-port PORT   TollGate HTTP listener port (default: 2121)
   --mint-url URL         Cashu mint allowed before authentication
+  --dns-server ADDRESS   Upstream DNS server for guest clients (default: 8.8.8.8)
   --ap-ip ADDRESS        Guest gateway address (default: 192.168.50.1)
   --list-interfaces      Show detected network interfaces and exit
   -h, --help             Show this help
@@ -133,6 +136,7 @@ SAVED_GUEST_IFACE=$(read_saved_setting MESHLINK_GUEST_INTERFACE)
 SAVED_TOLLGATE_PORT=$(read_saved_setting MESHLINK_TOLLGATE_PORT)
 SAVED_MINT_URL=$(read_saved_setting MESHLINK_MINT_URL)
 SAVED_AP_IP=$(read_saved_setting MESHLINK_AP_IP)
+SAVED_DNS_SERVER=$(read_saved_setting MESHLINK_DNS_SERVER)
 [ -n "$SAVED_WLAN_IFACE" ] && WLAN_IFACE="$SAVED_WLAN_IFACE"
 [ -n "$SAVED_WAN_IFACE" ] && WAN_IFACE="$SAVED_WAN_IFACE"
 [ -n "$SAVED_SECURITY_MODE" ] && SECURITY_MODE="$SAVED_SECURITY_MODE"
@@ -144,6 +148,7 @@ SAVED_AP_IP=$(read_saved_setting MESHLINK_AP_IP)
 [ -n "$SAVED_TOLLGATE_PORT" ] && TOLLGATE_PORT="$SAVED_TOLLGATE_PORT"
 [ -n "$SAVED_MINT_URL" ] && TOLLGATE_MINT_URL="$SAVED_MINT_URL"
 [ -n "$SAVED_AP_IP" ] && AP_IP="$SAVED_AP_IP"
+[ -n "$SAVED_DNS_SERVER" ] && DNS_SERVER_1="$SAVED_DNS_SERVER"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -216,6 +221,12 @@ while [ "$#" -gt 0 ]; do
             AP_IP="$2"
             shift 2
             ;;
+        --dns-server)
+            [ "$#" -ge 2 ] || fail "--dns-server requires a value"
+            DNS_SERVER_1="$2"
+            DNS_SERVER_2="$2"
+            shift 2
+            ;;
         --list-interfaces)
             list_interfaces
             exit 0
@@ -243,6 +254,7 @@ fi
 [[ "$TOLLGATE_PORT" =~ ^[0-9]{1,5}$ ]] || fail "Invalid --tollgate-port: $TOLLGATE_PORT"
 [ "$TOLLGATE_PORT" -ge 1 ] && [ "$TOLLGATE_PORT" -le 65535 ] || fail "Invalid --tollgate-port: $TOLLGATE_PORT"
 [[ "$TOLLGATE_MINT_URL" =~ ^https?:// ]] || fail "Invalid --mint-url: $TOLLGATE_MINT_URL"
+[[ "$DNS_SERVER_1" =~ ^[0-9a-fA-F:.]+$ ]] || fail "Invalid --dns-server: $DNS_SERVER_1"
 if [ "$LAB_QEMU" = "1" ] && [ "$AP_IP" != "192.168.50.1" ]; then
     AP_PREFIX="${AP_IP%.*}"
     DHCP_RANGE_START="$AP_PREFIX.10"
@@ -363,6 +375,7 @@ MESHLINK_LAB_QEMU=$LAB_QEMU
 MESHLINK_GUEST_INTERFACE=$GUEST_IFACE
 MESHLINK_TOLLGATE_PORT=$TOLLGATE_PORT
 MESHLINK_MINT_URL=$TOLLGATE_MINT_URL
+MESHLINK_DNS_SERVER=$DNS_SERVER_1
 CONFEOF
 sudo chmod 644 "$CONFIG_FILE"
 
@@ -611,8 +624,8 @@ interface=$GUEST_BRIDGE
 listen-address=$AP_IP
 bind-interfaces
 no-resolv
-server=8.8.8.8
-server=8.8.4.4
+server=$DNS_SERVER_1
+server=$DNS_SERVER_2
 dhcp-range=$DHCP_RANGE_START,$DHCP_RANGE_END,$AP_NETMASK,$DHCP_LEASE
 domain-needed
 bogus-priv
